@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>¿Quién es quién? Pokémon</title>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+:root{--bg:#16213e;--panel:#1f2f57;--fg:#f4f6fb;--mut:#9fb0d3;--red:#e63946;--card:#fff;--ink:#16213e;--me:#ffd23f;--them:#3fa7ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:500 16px/1.4 Fredoka,system-ui,sans-serif}
+main{max-width:1200px;margin:0 auto;padding:20px}
+h1{font-size:2rem;margin:.2em 0}
+input,select,button{font:inherit;padding:.55em .9em;border-radius:10px;border:2px solid #34497f;background:var(--panel);color:var(--fg)}
+button{cursor:pointer;background:var(--red);border-color:var(--red);font-weight:600}
+button.ghost{background:transparent;border-color:#34497f}
+button.on{background:var(--me);border-color:var(--me);color:var(--ink)}
+:focus-visible{outline:3px solid var(--them);outline-offset:2px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;align-items:center}
+#lobby{max-width:520px;margin-top:8vh}
+#lobbyMsg{color:var(--me)}
+#bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+#status{flex:1;min-width:200px}
+#wrap{display:grid;grid-template-columns:1fr 300px;gap:16px}
+@media(max-width:820px){#wrap{grid-template-columns:1fr}}
+#board{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px;align-content:start}
+.card{position:relative;background:var(--card);color:var(--ink);border-radius:14px;padding:6px 6px 8px;text-align:center;cursor:pointer;overflow:hidden;user-select:none}
+.card img{width:100%;aspect-ratio:1;object-fit:contain;display:block}
+.card b{display:block;font-size:.82rem;text-transform:capitalize;font-weight:600}
+.card.down{background:linear-gradient(var(--red) 0 46%,#151515 46% 54%,#fff 54%)}
+.card.down img,.card.down b{visibility:hidden}
+.card.down::after{content:"";position:absolute;left:50%;top:50%;width:30%;aspect-ratio:1;transform:translate(-50%,-50%);background:#fff;border:4px solid #151515;border-radius:50%}
+.card.mine{outline:4px solid var(--me)}
+.card.theirs{outline:4px solid var(--them)}
+body.guessing .card{cursor:crosshair}
+aside{background:var(--panel);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:8px;height:fit-content}
+#log{height:340px;overflow:auto;display:flex;flex-direction:column;gap:6px}
+#log div{padding:6px 10px;border-radius:10px;background:#2a3d6e;max-width:92%;word-break:break-word}
+#log .me{align-self:flex-end;background:#3a5a2e}
+#log .sys{background:none;color:var(--mut);font-size:.9rem;padding:0}
+aside .row{margin:0;flex-wrap:nowrap}
+aside input{flex:1;min-width:0}
+#end{margin-top:16px;background:var(--panel);border-radius:14px;padding:16px}
+#end h2{margin:0 0 6px}
+</style>
+</head>
+<body>
+<main id="lobby">
+  <h1>¿Quién es quién? Pokémon</h1>
+  <p>Elige el tamaño del tablero, crea una sala y pásale el código a tu rival.</p>
+  <div class="row">
+    <label>Tablero
+      <select id="size"><option>16<option selected>24<option>32</select>
+    </label>
+    <button id="create">Crear sala</button>
+  </div>
+  <div class="row">
+    <input id="code" placeholder="Código de sala" autocomplete="off">
+    <button id="join" class="ghost">Unirse</button>
+  </div>
+  <p id="lobbyMsg"></p>
+</main>
+
+<main id="game" hidden>
+  <div id="bar">
+    <span id="status"></span>
+    <button id="guessBtn" class="ghost">🎯 Adivinar</button>
+    <button id="reset" class="ghost">Salir</button>
+  </div>
+  <div id="wrap">
+    <div id="board"></div>
+    <aside>
+      <div id="log"></div>
+      <div class="row"><input id="msg" placeholder="Escribe una pregunta…" autocomplete="off"><button id="send">Enviar</button></div>
+    </aside>
+  </div>
+  <div id="end" hidden></div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let peer, conn, isHost = false, size = 24, ids = [], names = {};
+let secret = null, salt = '', theirHash = '', theirSecret = null, verified = null;
+let phase = 'lobby', mode = 'flip', outcome = null;
+const down = new Set();
+
+const img = id => `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${id}.png`;
+const nm = id => names[id] || '#' + id;
+const rnd = () => Math.random().toString(36).slice(2, 8).toUpperCase();
+const status = t => $('#status').textContent = t;
+
+async function sha(s) {
+  if (window.crypto && crypto.subtle) {
+    const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+    return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+  }
+  let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0; return String(h);
+}
+
+// Nombres de todo el pool (los primeros 1025 son la Pokédex nacional)
+fetch('https://pokeapi.co/api/v2/pokemon?limit=1025')
+  .then(r => r.json())
+  .then(j => { j.results.forEach((p, i) => names[i + 1] = p.name.replace(/-/g, ' ')); render(); })
+  .catch(() => {});
+
+function pick(n) {
+  const a = Array.from({ length: 1025 }, (_, i) => i + 1);
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; }
+  return a.slice(0, n);
+}
+
+function log(t, cls) {
+  const d = document.createElement('div');
+  d.className = cls || ''; d.textContent = t;
+  $('#log').append(d); $('#log').scrollTop = 1e9;
+}
+
+/* ---------- Conexión ---------- */
+function setup(c) {
+  conn = c;
+  c.on('data', onData);
+  c.on('close', () => log('El rival se ha desconectado', 'sys'));
+  const go = () => { if (isHost) { ids = pick(size); c.send({ t: 'start', ids, size }); start(); } };
+  c.open ? go() : c.on('open', go);
+}
+$('#create').onclick = () => {
+  isHost = true; size = +$('#size').value;
+  const code = rnd();
+  peer = new Peer('qqp-' + code);
+  peer.on('open', () => $('#lobbyMsg').textContent = 'Sala creada. Código: ' + code + ' · esperando al rival…');
+  peer.on('connection', setup);
+  peer.on('error', e => $('#lobbyMsg').textContent = 'Error de conexión: ' + e.type);
+};
+$('#join').onclick = () => {
+  const code = $('#code').value.trim().toUpperCase();
+  if (!code) return;
+  peer = new Peer();
+  peer.on('open', () => setup(peer.connect('qqp-' + code, { reliable: true })));
+  peer.on('error', e => $('#lobbyMsg').textContent = 'No se pudo entrar (' + e.type + '). Revisa el código.');
+};
+
+/* ---------- Partida ---------- */
+function start() {
+  phase = 'pick'; mode = 'flip'; outcome = null;
+  secret = null; theirHash = ''; theirSecret = null; verified = null; down.clear();
+  $('#lobby').hidden = true; $('#game').hidden = false; $('#end').hidden = true;
+  status('Elige tu Pokémon secreto: pulsa una carta.');
+  render();
+}
+
+function render() {
+  const b = $('#board'); b.innerHTML = '';
+  ids.forEach(id => {
+    const c = document.createElement('div');
+    c.className = 'card' + (down.has(id) ? ' down' : '') + (id === secret ? ' mine' : '') + (id === theirSecret ? ' theirs' : '');
+    const im = document.createElement('img'); im.src = img(id); im.alt = ''; im.loading = 'lazy';
+    const n = document.createElement('b'); n.textContent = nm(id);
+    c.append(im, n); c.onclick = () => click(id); b.append(c);
+  });
+}
+
+async function click(id) {
+  if (phase === 'over') return;
+  if (phase === 'pick') {
+    if (secret) return;
+    secret = id; salt = rnd() + rnd();
+    conn.send({ t: 'commit', h: await sha(id + ':' + salt) }); // solo se envía la huella
+    render(); ready(); return;
+  }
+  if (mode === 'guess') {
+    if (confirm('¿Adivinar ' + nm(id) + '? Si fallas, pierdes.')) {
+      conn.send({ t: 'guess', id }); status('Esperando la respuesta del rival…');
+    }
+    return;
+  }
+  down.has(id) ? down.delete(id) : down.add(id);
+  render();
+}
+
+function ready() {
+  if (secret && theirHash && phase === 'pick') { phase = 'play'; status('¡A jugar! Haced preguntas por el chat y tapad fichas.'); }
+  else if (secret) status('Esperando a que el rival elija su Pokémon…');
+}
+
+async function onData(m) {
+  if (m.t === 'start') { ids = m.ids; size = m.size; start(); }
+  else if (m.t === 'commit') { theirHash = m.h; log('El rival ya ha elegido su secreto', 'sys'); ready(); }
+  else if (m.t === 'chat') log('Rival: ' + m.x);
+  else if (m.t === 'guess' && phase === 'play') {
+    const ok = m.id === secret;
+    conn.send({ t: 'result', ok, id: secret, salt });
+    finish(ok ? 'lose' : 'win');
+  }
+  else if (m.t === 'result') {
+    theirSecret = m.id;
+    verified = (await sha(m.id + ':' + m.salt)) === theirHash;
+    conn.send({ t: 'reveal', id: secret, salt });
+    finish(m.ok ? 'win' : 'lose');
+  }
+  else if (m.t === 'reveal') {
+    theirSecret = m.id;
+    verified = (await sha(m.id + ':' + m.salt)) === theirHash;
+    showEnd();
+  }
+}
+
+function finish(o) { phase = 'over'; outcome = o; document.body.classList.remove('guessing'); showEnd(); }
+
+function showEnd() {
+  if (!outcome) return;
+  const e = $('#end'); e.hidden = false;
+  const title = outcome === 'win' ? '🎉 ¡Has ganado!' : '😿 Has perdido';
+  const check = verified === null ? '' : verified ? ' ✔ verificado' : ' ⚠ no coincide con lo que eligió al inicio';
+  e.innerHTML = '';
+  const h = document.createElement('h2'); h.textContent = title;
+  const p1 = document.createElement('p'); p1.textContent = 'Tu Pokémon: ' + nm(secret) + ' (marcado en amarillo)';
+  const p2 = document.createElement('p'); p2.textContent = 'Pokémon del rival: ' + (theirSecret ? nm(theirSecret) + ' (marcado en azul)' + check : '…');
+  const b = document.createElement('button'); b.textContent = 'Nueva partida'; b.onclick = () => location.reload();
+  e.append(h, p1, p2, b);
+  status('Partida terminada');
+  render();
+}
+
+/* ---------- Controles ---------- */
+$('#guessBtn').onclick = () => {
+  if (phase !== 'play') return;
+  mode = mode === 'guess' ? 'flip' : 'guess';
+  $('#guessBtn').classList.toggle('on', mode === 'guess');
+  document.body.classList.toggle('guessing', mode === 'guess');
+  status(mode === 'guess' ? 'Modo adivinar: pulsa la carta que crees que es.' : 'Modo voltear: pulsa para tapar o levantar.');
+};
+$('#send').onclick = () => {
+  const x = $('#msg').value.trim();
+  if (!x || !conn) return;
+  conn.send({ t: 'chat', x }); log('Tú: ' + x, 'me'); $('#msg').value = '';
+};
+$('#msg').onkeydown = e => { if (e.key === 'Enter') $('#send').click(); };
+$('#reset').onclick = () => location.reload();
+if (location.hash) $('#code').value = location.hash.slice(1);
+</script>
+</body>
+</html>
